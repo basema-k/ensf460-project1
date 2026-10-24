@@ -8,6 +8,7 @@
  *   PB3 + PB1  -> seconds - 1   (held: -1 each second)
  *   PB3 + PB2  -> minutes - 1   (held: -1 each second)
  *   PB3 alone  -> no change
+ *   All three  -> group info while held
  *   PB1 + PB2  -> short press: start the countdown
  *                 held 3 s:    reset to 00:00
  *
@@ -16,7 +17,11 @@
  *   Timer1 is used as a 1 s tick (pressTimer_start(0)) to print CNT.
  *   countDone -> FIN 00m : 00s - ALARM
  *
- * States: SET, RUN, FIN
+ * While counting:
+ *   PB3 short press (< 3 s) -> pause, press again -> resume
+ *   PB3 long press  (3 s)   -> CLR 00m : 00s, back to setting
+ *
+ * States: SET, RUN, PAUSE, FIN
  * PB1 = RB7 (CN23), PB2 = RA4 (CN0), PB3 = RB4 (CN1), active low
  */
 
@@ -29,8 +34,9 @@
 #define PB2 2
 #define PB3 4
 #define START (PB1 | PB2)
+#define ALL   (PB1 | PB2 | PB3)
 
-enum { SET, RUN, FIN };
+enum { SET, RUN, PAUSE, FIN };
 
 volatile uint8_t cnFlag = 0;
 
@@ -73,7 +79,7 @@ void IOstart(void) {
     Disp2String("m : ");
     XmitUART2('0' + seconds / 10, 1);
     XmitUART2('0' + seconds % 10, 1);
-    Disp2String("s        ");     // spaces wipe " - ALARM" from a FIN line
+    Disp2String("s               ");   // spaces wipe a longer FIN or group line
 }
 
 // One step up or down, depending on which buttons are held
@@ -96,7 +102,7 @@ static void step(void) {
     Disp2String("m : ");
     XmitUART2('0' + seconds / 10, 1);
     XmitUART2('0' + seconds % 10, 1);
-    Disp2String("s        ");     // spaces wipe " - ALARM" from a FIN line
+    Disp2String("s               ");   // spaces wipe a longer FIN or group line
 }
 
 static void startCount(void) {
@@ -125,17 +131,60 @@ void IOcheck(void) {
     if (now == buttons) return;       // no real change
     buttons = now;
 
-    if (state == RUN) return;         // buttons ignored while counting (for now)
+    // ----- While counting or paused: only PB3 does anything -----
+    if (state == RUN || state == PAUSE) {
+        if (now == 0) {                       // everything released
+            uint8_t isShort = pressTimer_stop();
+
+            if (held == PB3 && isShort && state == RUN) {
+                countTimer_pause();           // short PB3: pause
+                state = PAUSE;
+            } else if (held == PB3 && isShort && state == PAUSE) {
+                countTimer_resume();          // short PB3: resume
+                pressTimer_start(0);          // 1 s ticks again
+                state = RUN;
+                uint16_t left = countTimer_remaining();
+                minutes = left / 60;
+                seconds = left % 60;
+                Disp2String("\rCNT ");
+                XmitUART2('0' + minutes / 10, 1);
+                XmitUART2('0' + minutes % 10, 1);
+                Disp2String("m : ");
+                XmitUART2('0' + seconds / 10, 1);
+                XmitUART2('0' + seconds % 10, 1);
+                Disp2String("s");
+            } else if (state == RUN) {
+                pressTimer_start(0);          // keep the 1 s ticks going
+            }
+            held = 0;
+        } else if (now == PB3 && added) {     // PB3 pressed by itself
+            held = PB3;
+            pressTimer_start(PB3);            // Timer1 times the press (still ticks every 1 s)
+        } else {
+            held = 0;                         // any other button cancels the PB3 press
+        }
+        return;
+    }
 
     if (now == 0) {                   // everything released
         uint8_t isShort = pressTimer_stop();
-        if (held == START && isShort) startCount();
+        if (held == START && isShort) {
+            startCount();
+        } else if (held == ALL) {     // group info was showing: show the time again
+            Disp2String("\rSET ");
+            XmitUART2('0' + minutes / 10, 1);
+            XmitUART2('0' + minutes % 10, 1);
+            Disp2String("m : ");
+            XmitUART2('0' + seconds / 10, 1);
+            XmitUART2('0' + seconds % 10, 1);
+            Disp2String("s               ");   // spaces wipe a longer FIN or group line
+        }
         held = 0;
         return;
     }
 
     if (!added) {                     // one released, others still held
-        if (held != START) {          // keep PB1+PB2 so the start still works
+        if (held != START && held != ALL) {   // keep PB1+PB2 and all-three held
             pressTimer_stop();
             held = 0;
         }
@@ -151,16 +200,31 @@ void IOcheck(void) {
         Disp2String("m : ");
         XmitUART2('0' + seconds / 10, 1);
         XmitUART2('0' + seconds % 10, 1);
-        Disp2String("s        ");     // spaces wipe " - ALARM" from a FIN line
+        Disp2String("s               ");   // spaces wipe a longer FIN or group line
     }
     held = now;
     fast = 0;
     pressTimer_start(now);            // Timer1: 1 s ticks while held
-    step();                           // first step right away
+
+    if (now == ALL) {                 // all three held: group info
+        Disp2String("\r2026 ENSF 460 L01 - Group 7");   // 
+    } else {
+        step();                       // first step right away
+    }
 }
 
 // Held for 3 s (Timer1 stopped itself)
 void IOlong(void) {
+    if ((state == RUN || state == PAUSE) && held == PB3) {   // long PB3: clear
+        countTimer_pause();           // stop the countdown
+        minutes = 0;
+        seconds = 0;
+        state = SET;
+        held = 0;
+        Disp2String("\rCLR 00m : 00s               ");
+        return;
+    }
+
     if (state != SET) return;
 
     if (held == START) {              // PB1+PB2 held: reset to 00:00
@@ -172,7 +236,7 @@ void IOlong(void) {
         Disp2String("m : ");
         XmitUART2('0' + seconds / 10, 1);
         XmitUART2('0' + seconds % 10, 1);
-        Disp2String("s        ");     // spaces wipe " - ALARM" from a FIN line
+        Disp2String("s               ");   // spaces wipe a longer FIN or group line
         held = 0;
         return;
     }
@@ -208,6 +272,7 @@ void IOdone(void) {
     if (state != RUN) return;
 
     pressTimer_stop();                // no more ticks needed
+    held = 0;                         // a button still held: ignore its release
     state = FIN;
     minutes = 0;
     seconds = 0;
