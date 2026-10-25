@@ -52,7 +52,7 @@ void __attribute__((interrupt, no_auto_psv)) _T1Interrupt(void) {
     IFS0bits.T1IF = 0;
     seconds++;
 
-    if (seconds >= 3) {            // held 3 s -> long press
+    if (seconds >= 3) {            
         T1CONbits.TON = 0;
         longPressButton = timedButton;
     }
@@ -78,7 +78,7 @@ void countTimer_start(uint16_t totalSeconds) {
     PR3 = (uint16_t)(countPeriod >> 16);
     PR2 = (uint16_t)countPeriod;
 
-    IPC2bits.T3IP = 3;             // 32-bit match interrupt comes from Timer3
+    IPC2bits.T3IP = 3;             
     IFS0bits.T3IF = 0;
     IEC0bits.T3IE = 1;
 
