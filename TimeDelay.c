@@ -20,8 +20,8 @@ volatile uint8_t countDone = 0;            // read and cleared by IOs.c
 // Timer1: deciding if each press is long or short
 
 void timer1_init(void) {
-    T1CONbits.TON   = 0;
-    T1CONbits.TCS   = 0;      // Fcy
+    T1CONbits.TON = 0;
+    T1CONbits.TCS = 0;      // Fcy
     T1CONbits.TCKPS = 1;      // 1:8
     TMR1 = 0;
     PR1  = TICKS_PER_SEC;     // 1 sec
@@ -68,9 +68,9 @@ void countTimer_start(uint16_t totalSeconds) {
 
     countPeriod = (uint32_t)totalSeconds * TICKS_PER_SEC;
 
-    T2CONbits.TON   = 0;
-    T2CONbits.T32   = 1;           // combine Timer2 + Timer3
-    T2CONbits.TCS   = 0;           // Fcy
+    T2CONbits.TON = 0;
+    T2CONbits.T32 = 1;           // combine Timer2 + Timer3
+    T2CONbits.TCS = 0;           // Fcy
     T2CONbits.TCKPS = 1;           // 1:8
 
     TMR3HLD = 0;                   // high word first
