@@ -10,7 +10,7 @@
 // 31250 ticks per second
 #define TICKS_PER_SEC 31250
 
-static volatile uint8_t seconds     = 0;   // Timer1 one-second ticks
+static volatile uint8_t seconds = 0;   // Timer1 one-second ticks
 static volatile uint8_t timedButton = 0;   // button currently being timed
 static uint32_t countPeriod = 0;           // total ticks loaded into PR3:PR2
 
