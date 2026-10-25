@@ -12,7 +12,7 @@
 
 static volatile uint8_t seconds = 0;   // Timer1 one-second ticks
 static volatile uint8_t timedButton = 0;   // button currently being timed
-static uint32_t countPeriod = 0;           // total ticks loaded into PR3:PR2
+static uint32_t countPeriod = 0;           // total ticks loaded into PR3 and PR2
 
 volatile uint8_t longPressButton = 0;      // read and cleared by IOs.c
 volatile uint8_t countDone = 0;            // read and cleared by IOs.c
