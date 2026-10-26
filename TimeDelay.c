@@ -10,18 +10,22 @@
 // 31250 ticks per second
 #define TICKS_PER_SEC 31250
 
-static volatile uint8_t seconds = 0;   // Timer1 one-second ticks
+static volatile uint8_t seconds     = 0;   // Timer1 one-second ticks
 static volatile uint8_t timedButton = 0;   // button currently being timed
-static uint32_t countPeriod = 0;           // total ticks loaded into PR3 and PR2
+static uint32_t countPeriod = 0;           // total ticks loaded into PR3:PR2
 
 volatile uint8_t longPressButton = 0;      // read and cleared by IOs.c
 volatile uint8_t countDone = 0;            // read and cleared by IOs.c
-
+static volatile uint8_t alarmMode = 0;  // Indicates whether Timer1 is being used for the alarm
+volatile uint8_t alarmTick = 0; // Tells main.c that 0.5 seconds have passed.
+static volatile uint8_t comboMode = 0;  // Tells Timer1 that its detecting a button combination
+volatile uint8_t comboDone = 0; // Tells main.c that the waiting period has finished.
+volatile uint8_t normalTick = 0;
 // Timer1: deciding if each press is long or short
 
 void timer1_init(void) {
-    T1CONbits.TON = 0;
-    T1CONbits.TCS = 0;      // Fcy
+    T1CONbits.TON   = 0;
+    T1CONbits.TCS   = 0;      // Fcy
     T1CONbits.TCKPS = 1;      // 1:8
     TMR1 = 0;
     PR1  = TICKS_PER_SEC;     // 1 sec
@@ -31,8 +35,33 @@ void timer1_init(void) {
     IEC0bits.T1IE = 1;
 }
 
+void comboTimer_start(void){
+    T1CONbits.TON = 0;
+    
+    comboMode = 1;
+    comboDone = 0;
+    
+    TMR1 = 0;
+    PR1 = 3125;  // 100 ms for 1:8
+    IFS0bits.T1IF = 0;
+    T1CONbits.TON = 1;
+}
+
+void comboTimer_stop(void){
+    T1CONbits.TON = 0;
+    comboMode = 0;
+    comboDone = 0;
+}
 // Called from the CN ISR when a button goes down
 void pressTimer_start(uint8_t button) {
+    T1CONbits.TON = 0;
+
+    alarmMode = 0;
+    alarmTick = 0;
+    comboMode = 0;
+    comboDone = 0;
+
+    PR1 = 31250;    // ~1 second
     timedButton = button;
     seconds = 0;
     TMR1 = 0;
@@ -50,9 +79,23 @@ uint8_t pressTimer_stop(void) {
 
 void __attribute__((interrupt, no_auto_psv)) _T1Interrupt(void) {
     IFS0bits.T1IF = 0;
+    
+    if(comboMode){
+        T1CONbits.TON = 0;
+        comboMode = 0;
+        comboDone = 1;
+        return;
+    }
+    
+    if(alarmMode){
+        alarmTick = 1;
+        return;
+    }
+    
     seconds++;
+    normalTick = 1;
 
-    if (seconds >= 3) {            
+    if (seconds >= 3 && timedButton != 0) {            // held 3 s -> long press
         T1CONbits.TON = 0;
         longPressButton = timedButton;
     }
@@ -68,9 +111,9 @@ void countTimer_start(uint16_t totalSeconds) {
 
     countPeriod = (uint32_t)totalSeconds * TICKS_PER_SEC;
 
-    T2CONbits.TON = 0;
-    T2CONbits.T32 = 1;           // combine Timer2 + Timer3
-    T2CONbits.TCS = 0;           // Fcy
+    T2CONbits.TON   = 0;
+    T2CONbits.T32   = 1;           // combine Timer2 + Timer3
+    T2CONbits.TCS   = 0;           // Fcy
     T2CONbits.TCKPS = 1;           // 1:8
 
     TMR3HLD = 0;                   // high word first
@@ -78,7 +121,7 @@ void countTimer_start(uint16_t totalSeconds) {
     PR3 = (uint16_t)(countPeriod >> 16);
     PR2 = (uint16_t)countPeriod;
 
-    IPC2bits.T3IP = 3;             
+    IPC2bits.T3IP = 3;             // 32-bit match interrupt comes from Timer3
     IFS0bits.T3IF = 0;
     IEC0bits.T3IE = 1;
 
@@ -96,6 +139,17 @@ void countTimer_resume(void) {
     if (!countDone && countPeriod != 0) {
         T2CONbits.TON = 1;
     }
+}
+
+void countTimer_clear(void){
+    T2CONbits.TON = 0;
+    
+    TMR2 = 0;
+    TMR3HLD = 0;
+    
+    countPeriod = 0;
+    countDone = 0;
+    IFS0bits.T3IF = 0;
 }
 
 uint8_t countTimer_isRunning(void) {
@@ -118,6 +172,22 @@ uint16_t countTimer_remaining(void) {
 
     uint32_t left = countPeriod - elapsed;
     return (uint16_t)((left + TICKS_PER_SEC - 1) / TICKS_PER_SEC);
+}
+
+void alarmTimer_start(void){
+    T1CONbits.TON = 0;
+    
+    alarmMode = 1;
+    alarmTick = 0;
+    
+    seconds = 0;
+    timedButton = 0;
+    
+    TMR1 = 0;
+    PR1 = 7812;    //~0.25 seconds
+    
+    IFS0bits.T1IF = 0;
+    T1CONbits.TON = 1;
 }
 
 void __attribute__((interrupt, no_auto_psv)) _T3Interrupt(void) {
