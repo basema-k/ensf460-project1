@@ -30,301 +30,438 @@
 #include "TimeDelay.h"
 #include "UART2.h"
 
-#define PB1 1
-#define PB2 2
-#define PB3 4
-#define START (PB1 | PB2)
-#define ALL   (PB1 | PB2 | PB3)
+#define PB1 1                   // 001
+#define PB2 2                   // 010
+#define PB3 4                   // 100 (4 is used instead of 3 so it isn't the same as PB1 | PB2)
+#define START (PB1 | PB2)       // 011 (PB1 + PB2)
+#define ALL   (PB1 | PB2 | PB3) // 111 (All 3 buttons)
 
-enum { SET, RUN, PAUSE, FIN };
+// Operating states of the countdown timer.
+enum { SET, RUN, PAUSE, FIN };  // SET = 0, RUN = 1, PAUSE = 2, FIN = 3
 
-volatile uint8_t cnFlag = 0;
+volatile uint8_t cnFlag = 0;    // Set by CN ISR when a button change needs processing
 
-static uint8_t state   = SET;
-static uint8_t buttons = 0;   // button state last time we checked
-static uint8_t held    = 0;   // buttons being held (0 = none)
-static uint8_t minutes = 0;
-static uint8_t seconds = 0;
-static uint8_t fast    = 0;   // 1 -> PB1 held 3 s, count by 5
-static uint8_t wasLong = 0;
+static uint8_t state   = SET;   // Current operating state
+static uint8_t buttons = 0;     // Previous physical button combination
+static uint8_t held    = 0;     // Button combination currently being handled
+static uint8_t minutes = 0;     // Displayed minutes (0-59)
+static uint8_t seconds = 0;     // Displayed seconds (0-59)
+static uint8_t fast    = 0;     // PB1 fast-increment mode after a long hold
+static uint8_t wasLong = 0;     // START long press already handled
 
 void IOinit(void) {
-    TRISBbits.TRISB7 = 1;     // buttons are inputs
-    TRISAbits.TRISA4 = 1;
-    TRISBbits.TRISB4 = 1;
+    TRISBbits.TRISB7 = 1;       // Configures PB1 as an input
+    TRISBbits.TRISB4 = 1;       // Configures PB2 as an input
+    TRISAbits.TRISA4 = 1;       // Configures PB3 as an input
     
-    TRISBbits.TRISB9 = 0;   // LED1
-    TRISAbits.TRISA6 = 0;   // LED2
+    TRISBbits.TRISB9 = 0;       // Configures LED1 as an output
+    TRISAbits.TRISA6 = 0;       // Configures LED2 as an output
     
-    LATBbits.LATB9 = 0;     // LED1 starts OFF
-    LATAbits.LATA6 = 0;     // LED2 starts OFF
+    LATBbits.LATB9 = 0;         // LED1 starts OFF
+    LATAbits.LATA6 = 0;         // LED2 starts OFF
 
-    CNPU2bits.CN23PUE = 1;    // pull-ups
-    CNPU1bits.CN0PUE  = 1;
-    CNPU1bits.CN1PUE  = 1;
+    CNPU2bits.CN23PUE = 1;      // Enable internal pull-up resistor for PB1
+    CNPU1bits.CN1PUE  = 1;      // Enable internal pull-up resistor for PB2
+    CNPU1bits.CN0PUE  = 1;      // Enable internal pull-up resistor for PB3
 
-    CNEN2bits.CN23IE = 1;     // CN interrupt on all three buttons
-    CNEN1bits.CN0IE  = 1;
-    CNEN1bits.CN1IE  = 1;
-    IPC4bits.CNIP = 5;
-    IFS1bits.CNIF = 0;
-    IEC1bits.CNIE = 1;
+    CNEN2bits.CN23IE = 1;       // Enable CN interrupts for PB1
+    CNEN1bits.CN1IE  = 1;       // Enable CN interrupts for PB2
+    CNEN1bits.CN0IE  = 1;       // Enable CN interrupts for PB3
+    
+    IPC4bits.CNIP = 5;          // Sets the CN interrupt priority to 5
+    IFS1bits.CNIF = 0;          // Clear CN interrupt flag
+    IEC1bits.CNIE = 1;          // Enable CN interrupt
 }
 
+
+// Read active-low button pins and return a combined bit mask
 static uint8_t readButtons(void) {
-    uint8_t b = 0;
-    if (!PORTBbits.RB7) b |= PB1;
+    uint8_t b = 0;              // Start with no buttons pressed
+    
+    // A LOW input means the corresponding button is pressed (active-low)
+    // If a button is pressed it is 0, so using ! makes the if() true when a button is pressed
+    if (!PORTBbits.RB7) b |= PB1;   
     if (!PORTBbits.RB4) b |= PB2;
     if (!PORTAbits.RA4) b |= PB3;
-    return b;
+    return b;                   // 000-111 or 0-7 represents the current button combination
 }
 
+// Return 1 if the program is in SET mode, otherwise 0
 uint8_t IOisSetting(void){
     return state == SET;
 }
 
+// Display the current time in SET mode on the UART terminal
 void IOstart(void) {
-    Disp2String("\rSET ");
-    XmitUART2('0' + minutes / 10, 1);
-    XmitUART2('0' + minutes % 10, 1);
+    Disp2String("\rSET ");               // Return to start of line and print SET
+    
+    //Print minutes as two ASCII digits
+    XmitUART2('0' + minutes / 10, 1);    // 10's digit (minutes / 10 gives only the 10's digit of the minutes variable)
+    XmitUART2('0' + minutes % 10, 1);    // 1's digit (minutes % 10 gives only the 1's digit of the minutes variable)
+    
     Disp2String("m : ");
-    XmitUART2('0' + seconds / 10, 1);
-    XmitUART2('0' + seconds % 10, 1);
-    Disp2String("s               ");   // spaces wipe a longer FIN or group line
+    
+    //Print seconds as two ASCII digits
+    XmitUART2('0' + seconds / 10, 1);   // 10's digit (seconds / 10 gives only the 10's digit of the seconds variable)
+    XmitUART2('0' + seconds % 10, 1);   // 1's digit (seconds % 10 gives only the 1's digit of the seconds variable)
+    Disp2String("s               ");    // The spaces erase the leftover characters from longer messages
 }
 
 // One step up or down, depending on which buttons are held
 static void step(void) {
+    // Increase minutes, and wrap around after 59
     if (held == PB1) {
+        
+        // After a 3-second hold, increase by 5 at multiples of 5
+        // Otherwise increase by 1
         if (fast && seconds % 5 == 0) seconds = (seconds + 5) % 60;
         else                          seconds = (seconds + 1) % 60;
+        
+    // Increase minutes, and wrap around after 59
     } else if (held == PB2) {
         minutes = (minutes + 1) % 60;
+        
+    // PB1 + PB3 decreases seconds, wrapping 0 back to 59
     } else if (held == (PB3 | PB1)) {
         seconds = (seconds == 0) ? 59 : seconds - 1;
+        
+    // PB2 + PB3 decreases seconds, wrapping 0 back to 59
     } else if (held == (PB3 | PB2)) {
         minutes = (minutes == 0) ? 59 : minutes - 1;
+        
+    // Other combinations do not change time 
     } else {
-        return;               // PB3 alone or other combos: no change
+        return;               
     }
-    Disp2String("\rSET ");
-    XmitUART2('0' + minutes / 10, 1);
-    XmitUART2('0' + minutes % 10, 1);
+    
+    // Display the current time in SET mode on the UART terminal
+    Disp2String("\rSET ");              // Return to start of line and print SET
+    
+    //Print minutes as two ASCII digits
+    XmitUART2('0' + minutes / 10, 1);   // 10's digit (minutes / 10 gives only the 10's digit of the minutes variable)
+    XmitUART2('0' + minutes % 10, 1);   // 1's digit (minutes % 10 gives only the 1's digit of the minutes variable)
+    
     Disp2String("m : ");
-    XmitUART2('0' + seconds / 10, 1);
-    XmitUART2('0' + seconds % 10, 1);
-    Disp2String("s               ");   // spaces wipe a longer FIN or group line
+    
+    //Print seconds as two ASCII digits
+    XmitUART2('0' + seconds / 10, 1);   // 10's digit (seconds / 10 gives only the 10's digit of the seconds variable)
+    XmitUART2('0' + seconds % 10, 1);   // 1's digit (seconds % 10 gives only the 1's digit of the seconds variable)
+    Disp2String("s               ");    // The spaces erase the leftover characters from longer messages
 }
 
 static void startCount(void) {
-    uint16_t total = minutes * 60 + seconds;
+    uint16_t total = minutes * 60 + seconds;    // Convert minutes and seconds into total seconds (16-bit int used since 59 * 60 + 59 = 3599 seconds which is greater than 255 so an 8-bit int is not large enough)
 
-    if (total == 0) {         // corner case: nothing to count, stay in SET
+    // Do not start a countdown if the selected time is zero
+    if (total == 0) {         
         return;
     }
-    countTimer_start(total);  // Timer2/3 counts the whole time
-    pressTimer_start(0);      // Timer1: 1 s ticks to update the display
-    state = RUN;
-    LATBbits.LATB9 = 1;     // LED1 ON initially
-    LATAbits.LATA6 = 0;     // LED2 OFF
-    Disp2String("\rCNT ");
-    XmitUART2('0' + minutes / 10, 1);
-    XmitUART2('0' + minutes % 10, 1);
+    
+    countTimer_start(total);        // Timer 2/3 measures the full countdown duration
+    pressTimer_start(0);            // Timer 1 generates 1 second ticks, the 0 argument disables long-press detection
+    state = RUN;                    // Enter countdown mode
+    LATBbits.LATB9 = 1;             // Start LED1 ON, Timer 1 will toggle it each second
+    LATAbits.LATA6 = 0;             // Keep alarm LED2 OFF during countdown
+    
+    // Display the current time in RUN mode on the UART terminal
+    Disp2String("\rCNT ");              // Return to start of line and print CNT
+    
+    //Print minutes as two ASCII digits
+    XmitUART2('0' + minutes / 10, 1);    // 10's digit (minutes / 10 gives only the 10's digit of the minutes variable)
+    XmitUART2('0' + minutes % 10, 1);    // 1's digit (minutes % 10 gives only the 1's digit of the minutes variable)
+    
     Disp2String("m : ");
-    XmitUART2('0' + seconds / 10, 1);
-    XmitUART2('0' + seconds % 10, 1);
+    
+    //Print seconds as two ASCII digits
+    XmitUART2('0' + seconds / 10, 1);   // 10's digit (seconds / 10 gives only the 10's digit of the seconds variable)
+    XmitUART2('0' + seconds % 10, 1);   // 1's digit (seconds % 10 gives only the 1's digit of the seconds variable)
+    
     Disp2String("s");
 }
 
-// A button changed
+// Process button changes by comparing current and previous button states
 void IOcheck(void) {
-    uint8_t now = readButtons();
-    uint8_t added = now & ~buttons;   // buttons that just went down
+    uint8_t now = readButtons();        // Bit mask of the buttons currently pressed
+    uint8_t added = now & ~buttons;     // Identify newly pressed buttons by comparing current and previous states
 
-    if (now == buttons) return;       // no real change
-    buttons = now;
+    if (now == buttons) return;         // Ignore if the button state has not changed
+    buttons = now;                      // Save current state for the next comparison
 
-    // ----- While counting or paused: only PB3 does anything -----
+    
+    // RUN/PAUSE: PB3 short press pauses/resumes, long press clears countdown
     if (state == RUN || state == PAUSE) {
-        if (now == 0) {                       // everything released
-            uint8_t isShort = pressTimer_stop();
+        if (now == 0) {                             // No button is physically pressed
+            uint8_t isShort = pressTimer_stop();    // Stop Timer 1 and check if it was still running, still running means there was not a long press, so it is a short press
 
+            // PB3 was released before 3 seconds while countdown was RUNNING
             if (held == PB3 && isShort && state == RUN) {
-                countTimer_pause();           // short PB3: pause
-                state = PAUSE;
+                countTimer_pause();     // PAUSE Timer 2/3 without resetting the count
+                state = PAUSE;          // Enter PAUSE mode
                 
-                LATBbits.LATB9 = 0;
-                LATAbits.LATA6 = 0;
+                LATBbits.LATB9 = 0;     // Turn off LED1
+                LATAbits.LATA6 = 0;     // Turn off LED2
+                
+            // PB3 was released before 3 seconds while countdown was PAUSED
             } else if (held == PB3 && isShort && state == PAUSE) {
-                countTimer_resume();          // short PB3: resume
-                pressTimer_start(0);          // 1 s ticks again
-                state = RUN;
-                LATBbits.LATB9 = 1;
-                LATAbits.LATA6 = 0;
-                uint16_t left = countTimer_remaining();
+                countTimer_resume();                        // RESUME Timer 2/3 without resetting the count
+                pressTimer_start(0);                        // Restart 1-second ticks. Zero argument means its not tracking a long press
+                state = RUN;                                // Return to RUN mode
+                LATBbits.LATB9 = 1;                         // LED1 initially ON, resumes blinking
+                LATAbits.LATA6 = 0;                         // KEEP alarm LED2 OFF
+                
+                // Read the remaining countdown time from Timer 2/3 and convert total seconds back to minutes and seconds for display
+                uint16_t left = countTimer_remaining();     
                 minutes = left / 60;
                 seconds = left % 60;
+                
+                // Display the current time in RUN mode on the UART terminal
                 Disp2String("\rCNT ");
-                XmitUART2('0' + minutes / 10, 1);
-                XmitUART2('0' + minutes % 10, 1);
+                
+                //Print minutes as two ASCII digits
+                XmitUART2('0' + minutes / 10, 1);   // 10's digit (minutes / 10 gives only the 10's digit of the minutes variable)
+                XmitUART2('0' + minutes % 10, 1);   // 1's digit (minutes % 10 gives only the 1's digit of the minutes variable)
+                
                 Disp2String("m : ");
-                XmitUART2('0' + seconds / 10, 1);
-                XmitUART2('0' + seconds % 10, 1);
+                
+                //Print seconds as two ASCII digits
+                XmitUART2('0' + seconds / 10, 1);   // 10's digit (seconds / 10 gives only the 10's digit of the seconds variable)
+                XmitUART2('0' + seconds % 10, 1);   // 1's digit (seconds % 10 gives only the 1's digit of the seconds variable)
+                
                 Disp2String("s");
+                
+            // No pause/resume occurred
             } else if (state == RUN) {
-                pressTimer_start(0);          // keep the 1 s ticks going
+                pressTimer_start(0);          // Restore Timer1's normal 1-second ticks
             }
-            held = 0;
-        } else if (now == PB3 && added) {     // PB3 pressed by itself
-            held = PB3;
-            pressTimer_start(PB3);            // Timer1 times the press (still ticks every 1 s)
+            held = 0;                         // The button release has been processed, so clear the tracked button
+        
+        // If only PB3 is pressed and at least 1 button is pressed
+        } else if (now == PB3 && added) {
+            held = PB3;                       // Remember PB3 so its release can be handled later
+            pressTimer_start(PB3);            // Start measuring PB3's press duration using Timer1, holding for 3 second triggers longPressButton
+           
+        // Ignore other button combinations during RUN/PAUSE
         } else {
-            held = 0;                         // any other button cancels the PB3 press
+            held = 0;         
         }
         return;
     }
 
-    if (now == 0) {                   // everything released
-        pressTimer_stop();
+    // All buttons released: process the previously tracked combination
+    if (now == 0) {
+        pressTimer_stop();      // Stop measuring the button press
+        
+        // Short PB1 + PB2 press starts the countdown
+        // wasLong prevents a completed long press from triggering START
         if (held == START && !wasLong) {
             startCount();
-        } else if (held == ALL) {     // group info was showing: show the time again
-            Disp2String("\rSET ");
-            XmitUART2('0' + minutes / 10, 1);
-            XmitUART2('0' + minutes % 10, 1);
+            
+        // All 3 buttons were released, restore the normal SET display after showing group info
+        } else if (held == ALL) {
+            // Display the current time in SET mode on the UART terminal
+            Disp2String("\rSET ");              // Return to start of line and print SET
+            
+            XmitUART2('0' + minutes / 10, 1);   // 10's digit (minutes / 10 gives only the 10's digit of the minutes variable)
+            XmitUART2('0' + minutes % 10, 1);   // 1's digit (minutes % 10 gives only the 1's digit of the minutes variable)
+            
             Disp2String("m : ");
-            XmitUART2('0' + seconds / 10, 1);
-            XmitUART2('0' + seconds % 10, 1);
-            Disp2String("s               ");   // spaces wipe a longer FIN or group line
+            
+            XmitUART2('0' + seconds / 10, 1);   // 10's digit (seconds / 10 gives only the 10's digit of the seconds variable)
+            XmitUART2('0' + seconds % 10, 1);   // 1's digit (seconds % 10 gives only the 1's digit of the seconds variable)
+            
+            Disp2String("s               ");   // The spaces erase the leftover characters from longer messages
         }
         held = 0;
         return;
     }
 
-    if (!added) {                     // one released, others still held
-        if (held != START && held != ALL) {   // keep PB1+PB2 and all-three held
+    // The button combination changed but no new button was pressed
+    // Means a partial release while another button remains down
+    if (!added) {
+        
+        // Preserve START and ALL until every button is released
+        // Other combinations are cancelled when partially released
+        if (held != START && held != ALL) {
             pressTimer_stop();
             held = 0;
         }
-        return;
+        
+        return;     // Wait for the remaining buttons to be released
     }
 
-    // A new button went down
-    if (state == FIN) {               // leave the alarm, clear the ALARM message
-        state = SET;
-        pressTimer_stop();
-        alarmTick = 0;
-        LATBbits.LATB9 = 0;
-        LATAbits.LATA6 = 0;
-        Disp2String("\rSET ");
-        XmitUART2('0' + minutes / 10, 1);
-        XmitUART2('0' + minutes % 10, 1);
+    // A new button press while FIN is active dismisses the alarm
+    if (state == FIN) {
+        state = SET;                        // Return state to SET mode
+        pressTimer_stop();                  // Stop Timer 1's alarm blinking
+        alarmTick = 0;                      // Clear any pending alarm event
+        
+        LATBbits.LATB9 = 0;                 // Turn LED1 OFF
+        LATAbits.LATA6 = 0;                 // Turn LED2 OFF
+        
+        
+        // Display the current time in SET mode on the UART terminal
+        Disp2String("\rSET ");              // Return to start of line and print SET
+            
+        XmitUART2('0' + minutes / 10, 1);   // 10's digit (minutes / 10 gives only the 10's digit of the minutes variable)
+        XmitUART2('0' + minutes % 10, 1);   // 1's digit (minutes % 10 gives only the 1's digit of the minutes variable)
+            
         Disp2String("m : ");
-        XmitUART2('0' + seconds / 10, 1);
-        XmitUART2('0' + seconds % 10, 1);
-        Disp2String("s               ");   // spaces wipe a longer FIN or group line
+        
+        XmitUART2('0' + seconds / 10, 1);   // 10's digit (seconds / 10 gives only the 10's digit of the seconds variable)
+        XmitUART2('0' + seconds % 10, 1);   // 1's digit (seconds % 10 gives only the 1's digit of the seconds variable)
+            
+        Disp2String("s               ");   // The spaces erase the leftover characters from longer messages
     }
+    
+    // Begin tracking a new button press or combination
     held = now;
-    fast = 0;
-    wasLong = 0;
-    pressTimer_start(now);            // Timer1: 1 s ticks while held
+            
+    fast = 0;                   // Reset fast-increment mode for the new press
+    wasLong = 0;                // Reset the previous long-press indicator    
+    pressTimer_start(now);      // Start Timer 1 to detect whether this combination is held for 3 seconds
     
+    // All 3 buttons display the group information
+    if (now == ALL) {
+        Disp2String("\r2026 ENSF 460 L01 - Group 7");
     
-    if (now == ALL) {                 // all three held: group info
-        Disp2String("\r2026 ENSF 460 L01 - Group 7");   // 
+    // Other combinations are passed to step() for time adjustment
     } else {
         step();                       // first step right away
     }
 }
 
-// Held for 3 s (Timer1 stopped itself)
+// Handle a button combination that has reached the 3-second hold threshold
 void IOlong(void) {
-    if ((state == RUN || state == PAUSE) && held == PB3) {   // long PB3: clear
-        countTimer_clear();           // stop the countdown
-        minutes = 0;
-        seconds = 0;
-        state = SET;
-        LATBbits.LATB9 = 0;
-        LATAbits.LATA6 = 0;
-        held = 0;
-        Disp2String("\rCLR 00m : 00s               ");
+    // If the countdown is running or paused, and PB3 has been held for 3 seconds
+    if ((state == RUN || state == PAUSE) && held == PB3) {
+        countTimer_clear();         // Stop and reset Timer 2/3 and countdown flags
+        minutes = 0;                // Clear displayed minutes
+        seconds = 0;                // Clear displayed seconds
+        state = SET;                // Return to time-setting mode
+        LATBbits.LATB9 = 0;         // LED1 OFF
+        LATAbits.LATA6 = 0;         // LED2 OFF
+        held = 0;                   // Clear the tracked press after handling the long press
+        Disp2String("\rCLR 00m : 00s               ");      // Show cleared countdown
         return;
     }
 
-    if (state != SET) return;
+    if (state != SET) return;       // Remaining long-press actions only apply in SET mode
 
-    if (held == START) {              // PB1+PB2 held: reset to 00:00
-        minutes = 0;
-        seconds = 0;
-        Disp2String("\rSET ");
-        XmitUART2('0' + minutes / 10, 1);
-        XmitUART2('0' + minutes % 10, 1);
+    // If PB1 + PB2 is held then clear time
+    if (held == START) {
+        minutes = 0;                        // Set minutes to 0
+        seconds = 0;                        // Set seconds to 0
+        
+         // Display the current time in SET mode on the UART terminal
+        Disp2String("\rSET ");              // Return to start of line and print SET
+            
+        XmitUART2('0' + minutes / 10, 1);   // 10's digit (minutes / 10 gives only the 10's digit of the minutes variable)
+        XmitUART2('0' + minutes % 10, 1);   // 1's digit (minutes % 10 gives only the 1's digit of the minutes variable)
+            
         Disp2String("m : ");
-        XmitUART2('0' + seconds / 10, 1);
-        XmitUART2('0' + seconds % 10, 1);
-        Disp2String("s               ");   // spaces wipe a longer FIN or group line
-        wasLong = 1;
-        held = 0;
+        
+        XmitUART2('0' + seconds / 10, 1);   // 10's digit (seconds / 10 gives only the 10's digit of the seconds variable)
+        XmitUART2('0' + seconds % 10, 1);   // 1's digit (seconds % 10 gives only the 1's digit of the seconds variable)
+            
+        Disp2String("s               ");   // The spaces erase the leftover characters from longer messages
+        
+        wasLong = 1;                        // Mark that START's long press action occurred
+        held = 0;                           // Prevent release from triggering short START action
         return;
     }
-    if (held == PB1) fast = 1;        // switch to +5
-    if (held) pressTimer_start(held); // keep the 1 s ticks going
+    
+    // After PB1 is held for 3 seconds, enable 5-second increments
+    if (held == PB1) fast = 1;
+    
+    // Timer 1 stopped at the 3-second threshold
+    // Restart it while a button is tracked so periodic ticks can continue
+    if (held) pressTimer_start(held);
 }
 
-// One second passed
+// Handle periodic Timer 1 events based on the current program state
 void IOtick(void) {
+    
+    // SET mode: Repeat the selected button time adjustment on each Timer 1 tick while a valid button is held
     if (state == SET) {
-        step();                       // still held: another step
+        step();      
+    
     } else if (state == RUN) {
-        LATBbits.LATB9 ^= 1;
-        uint16_t left = countTimer_remaining();
-        if (left == 0) return;        // the end is handled by IOdone()
-        minutes = left / 60;
+        LATBbits.LATB9 ^= 1;                        // Toggle LED1 on each 1 second Timer 1 tick
+        uint16_t left = countTimer_remaining();     // Read the actual remaining countdown time from Timer 2/3
+        
+        if (left == 0) return;                      // Do not refresh count at zero, countdown completion is handled by IOdone()
+        
+        // Convert total remaining seconds into minutes and seconds
+        minutes = left / 60;                        
         seconds = left % 60;
-        Disp2String("\rCNT ");
-        XmitUART2('0' + minutes / 10, 1);
-        XmitUART2('0' + minutes % 10, 1);
+        
+        // Display the current time in RUN mode on the UART terminal
+        Disp2String("\rCNT ");              // Return to start of line and print CNT
+    
+        //Print minutes as two ASCII digits
+        XmitUART2('0' + minutes / 10, 1);    // 10's digit (minutes / 10 gives only the 10's digit of the minutes variable)
+        XmitUART2('0' + minutes % 10, 1);    // 1's digit (minutes % 10 gives only the 1's digit of the minutes variable)
+
         Disp2String("m : ");
-        XmitUART2('0' + seconds / 10, 1);
-        XmitUART2('0' + seconds % 10, 1);
+
+        //Print seconds as two ASCII digits
+        XmitUART2('0' + seconds / 10, 1);   // 10's digit (seconds / 10 gives only the 10's digit of the seconds variable)
+        XmitUART2('0' + seconds % 10, 1);   // 1's digit (seconds % 10 gives only the 1's digit of the seconds variable)
+    
         Disp2String("s");
+        
+    // FIN mode: Toggle LED2 every ~0.25 second for the alarm
     } else if(state == FIN){
         LATAbits.LATA6 ^= 1;
     }
 }
 
-// Timer2/3 reached the set time
 void IOdone(void) {
-    countDone = 0;
-    if (state != RUN) return;
+    countDone = 0;                      // Clear the countdown completion flag after handling it
+    if (state != RUN) return;           // Only a running countdown can transition into FIN mode
 
-    pressTimer_stop();                // no more ticks needed
-    held = 0;                         // a button still held: ignore its release
-    state = FIN;
-    LATBbits.LATB9 = 1;     // LED1 solid ON
-    LATAbits.LATA6 = 0;     // LED2 initially OFF
-    alarmTimer_start();     // Start 0.5 second alarm blink
+    pressTimer_stop();                  // Stop normal 1 second Timer 1 updates
+    
+    held = 0;                           // Clear any tracked button combination
+    state = FIN;                        // Transition from RUN to FIN mode
+    LATBbits.LATB9 = 1;                 // Keep LED1 ON after countdown completion
+    LATAbits.LATA6 = 0;                 // Initialize LED2 OFF before alarm blinking
+    alarmTimer_start();                 // Reconfigure Timer1 for ~0.25 second alarm ticks to blink LED2
+    
+    // Reset displayed countdown time to zero
     minutes = 0;
     seconds = 0;
-    Disp2String("\rFIN ");
-    XmitUART2('0' + minutes / 10, 1);
-    XmitUART2('0' + minutes % 10, 1);
+    
+    // Display the finished countdown and alarm message on UART
+    Disp2String("\rFIN ");              // Return to start of line and print FIN
+    
+    //Print minutes as two ASCII digits
+    XmitUART2('0' + minutes / 10, 1);    // 10's digit (minutes / 10 gives only the 10's digit of the minutes variable)
+    XmitUART2('0' + minutes % 10, 1);    // 1's digit (minutes % 10 gives only the 1's digit of the minutes variable)
+
     Disp2String("m : ");
-    XmitUART2('0' + seconds / 10, 1);
-    XmitUART2('0' + seconds % 10, 1);
-    Disp2String("s - ALARM");
+
+    //Print seconds as two ASCII digits
+    XmitUART2('0' + seconds / 10, 1);   // 10's digit (seconds / 10 gives only the 10's digit of the seconds variable)
+    XmitUART2('0' + seconds % 10, 1);   // 1's digit (seconds % 10 gives only the 1's digit of the seconds variable)
+    
+    Disp2String("s -  ALARM");
 }
 
+// Return 1 if the countdown is in FIN mode, otherwise return 0
 uint8_t IOisFinished(void){
     return state == FIN;
 }
 
-// CN ISR: only sets a flag
+// CN ISR: Executes when an enabled button input changes
 void __attribute__((interrupt, no_auto_psv)) _CNInterrupt(void) {
-    IFS1bits.CNIF = 0;
+    IFS1bits.CNIF = 0;          // Clear CN interrupt flag
     
+    // In SET mode, wait ~100ms before processing button changes, to help recognize combinations
     if(state ==  SET){
         comboTimer_start();
+        
+    // Signal main to process button changes immediately
     } else {
         cnFlag = 1;
     }
