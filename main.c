@@ -58,48 +58,65 @@
 #include "TimeDelay.h"
 
 int main(void) {
-    AD1PCFG = 0xFFFF;     // all pins digital
-    newClk(500);          // 500 kHz -> UART at 4800 baud
-    InitUART2();
-    IOinit();
-    timer1_init();
+    AD1PCFG = 0xFFFF;           // All pins digital
+    newClk(500);                // Set oscillator to ~500 kHz -> UART at 4800 baud
+    InitUART2();                // Initialize UART2 for terminal output
+    IOinit();                   // Configure buttons, LEDs, pull-ups, and CN interrupts
+    timer1_init();              // Configure Timer 1 and its interrupt 
 
-    IOstart();            // SET 00m : 00s
+    IOstart();                  // Display the initial SET 00m : 00s message
 
     while (1) {
-        uint8_t handled = 0;
 
         // UART2.c turns on its TX interrupt each time it sends. Turn it off
         // so it can't wake the CPU and be mistaken for a Timer1 tick.
         IEC1bits.U2TXIE = 0;
         IFS1bits.U2TXIF = 0;
 
-        if (!cnFlag && !longPressButton && !countDone) {
-            Idle();       // sleep until an interrupt
+        // Enter low-power Idle mode only when no interrupt-generated events are waiting to be processed
+        if (!cnFlag && !longPressButton && !countDone && !alarmTick && !comboDone && !normalTick) {
+            Idle();       // Sleep until an interrupt occurs
         }
 
-        if (countDone) {              // Timer3: time is up
+        // Handle countdown completion signaled by the Timer 3 ISR
+        if (countDone) {
             IOdone();
-            handled = 1;
         }
 
-        if (cnFlag) {                 // a button changed
-            cnFlag = 0;
-            IOcheck();
-            handled = 1;
+        // Process button changes signaled by the CN interrupt
+       if (cnFlag) {
+           cnFlag = 0;                 // Clear the pending button change flag
+
+           if (IOisSetting()) {
+               comboTimer_start();     // SET mode: wait ~100 ms so button combinations can settle
+           } else {
+             IOcheck();              // Other modes: handle the change right away
+           }
+        }
+        
+        // Process SET mode button combinations after the ~100ms detection window
+        if(comboDone){
+            comboDone = 0;      // Clear the completed combination event
+            IOcheck();          // Read the final button combination
         }
 
-        if (longPressButton) {        // held 3 s (also a 1 s tick)
-            longPressButton = 0;
-            IOlong();
-            IOtick();
-            handled = 1;
+        // Handle a 3-second button hold detected by Timer 1
+        if (longPressButton) { 
+            longPressButton = 0;        // Clear the long-press event flag
+            IOlong();                   // Execute the state-dependent long-press action
+        }
+        
+        // Handle ~0.25 second alarm ticks by updating the FIN state LED
+        if(alarmTick){              
+            alarmTick = 0;          // Clear the pending alarm tick flag
+            IOtick();               // Toggle LED2 while in FIN mode
         }
 
-        // Timer1's 1 s interrupt wakes the CPU without setting a flag,
-        // so waking with nothing to do means one second passed
-        if (!handled) {
-            IOtick();
+        // Handle normal 1 second Timer 1 events
+        // Updates held-button adjustments or the running countdown display
+        if (normalTick) {
+            normalTick = 0;     // Clear the pending one second tick
+            IOtick();           // Perform the state-dependent periodic update
         }
     }
     return 0;
